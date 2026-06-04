@@ -36,9 +36,9 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          TICK_SECONDS: "45"    # тик каждые 45 секунд
-          GG_FETCH: "120"       # лёгкий фетч на быстрых тиках (не весь стакан)
-          FRAG_FETCH: "80"
+          TICK_SECONDS: "15"    # тик каждые 15 секунд
+          GG_FETCH: "100"       # 2 страницы — флор ловится уже на 1-й, запас на сдвиг сортировки
+          FRAG_FETCH: "60"
           MARGIN: "0.15"
           FEE_SELL: "0.10"
           MIN_NET_TON: "30"
