@@ -162,7 +162,7 @@ def tick():
             if FLOOR_MAX and l["price"] <= FLOOR_MAX:
                 ref = ("потолок", FLOOR_MAX)
             elif thresh and l["price"] <= thresh:
-                ref = (f"флор+{FLOOR_PCT:g}%", thresh)
+                ref = (("флор" if FLOOR_PCT == 0 else f"флор+{FLOOR_PCT:g}%"), thresh)
             if ref:
                 k = f"below:{nid}:{int(l['price'])}"
                 if k not in alerted:
