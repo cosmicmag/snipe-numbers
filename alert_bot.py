@@ -193,9 +193,16 @@ def tick():
 def main():
     if TICK_SECONDS > 0:
         log(f"loop mode: тик каждые {TICK_SECONDS}s (GG_FETCH={GG_FETCH} FRAG_FETCH={FRAG_FETCH})")
+        first = True
         while True:
             try:
                 tick()
+                if first:  # стартовый пинг = подтверждение что бот жив
+                    fl = load_state().get("gg_true_floor")
+                    tg_send(f"🟢 <b>snipe-bot запущен</b>\nтик каждые {TICK_SECONDS}s · "
+                            f"флор {fl:.0f} TON · ловлю флор+{FLOOR_PCT:g}%" if fl else
+                            "🟢 <b>snipe-bot запущен</b>")
+                    first = False
             except Exception as e:
                 log(f"⚠️ tick err: {e}")
             time.sleep(TICK_SECONDS)
