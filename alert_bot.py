@@ -30,6 +30,9 @@ FEE_SELL = float(os.environ.get("FEE_SELL", "0.10"))   # 5% маркет + ~5% �
 GAS_TON = float(os.environ.get("GAS_TON", "1.0"))
 MIN_NET_TON = float(os.environ.get("MIN_NET_TON", "30"))  # минимум чистыми чтоб алертить арб
 CHEAP_TOP_N = 5
+TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "0"))   # >0 = бесконечный loop с этим интервалом; 0 = один тик
+GG_FETCH = int(os.environ.get("GG_FETCH", "400"))         # сколько листингов Getgems тянуть за тик (на быстрых тиках меньше)
+FRAG_FETCH = int(os.environ.get("FRAG_FETCH", "200"))
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT_ID", "")
 
@@ -63,7 +66,7 @@ def gather():
     """Собрать листинги обеих витрин (только fix-price TON для снайпа)."""
     out = []
     try:
-        for l in fetch_on_sale(max_items=400):
+        for l in fetch_on_sale(max_items=GG_FETCH):
             if l["currency"] != "TON":
                 continue
             l["venue"] = "Getgems"
@@ -71,7 +74,7 @@ def gather():
     except Exception as e:
         log(f"⚠️ getgems err: {e}")
     try:
-        for l in fetch_listings(200):
+        for l in fetch_listings(FRAG_FETCH):
             l["venue"] = "Fragment"
             out.append(l)
     except Exception as e:
@@ -96,7 +99,7 @@ def fmt(l, v, kind, extra=""):
             f"паттерн: {','.join(v.tags)}\n{inst}\n{l['url']}")
 
 
-def main():
+def tick():
     s = load_state()
     seen = set(s.get("seen_ids", []))
     alerted = set(s.get("alerted", []))
@@ -169,6 +172,19 @@ def main():
         "gg_floor": gg_floor,
         "alerted": list(alerted)[-3000:],
     }, open(STATE, "w"), indent=1)
+
+
+def main():
+    if TICK_SECONDS > 0:
+        log(f"loop mode: тик каждые {TICK_SECONDS}s (GG_FETCH={GG_FETCH} FRAG_FETCH={FRAG_FETCH})")
+        while True:
+            try:
+                tick()
+            except Exception as e:
+                log(f"⚠️ tick err: {e}")
+            time.sleep(TICK_SECONDS)
+    else:
+        tick()
 
 
 if __name__ == "__main__":
