@@ -1,0 +1,40 @@
+name: snipe-numbers alert bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # каждые 5 минут (UTC; GH может задержать на 1-3 мин под нагрузкой)
+  workflow_dispatch: {}      # ручной запуск кнопкой в Actions
+
+concurrency:
+  group: snipe-bot
+  cancel-in-progress: false  # не обрывать тик на полпути
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # дедуп-стейт между запусками через cache (без коммит-спама).
+      # ключ уникален на запуск → всегда сохраняем свежий; restore-keys тянет последний.
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: state.json
+          key: snipe-state-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            snipe-state-
+
+      - name: Run alert bot (one tick)
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          MARGIN: "0.15"
+          FEE_SELL: "0.10"
+          MIN_NET_TON: "30"
+        run: python alert_bot.py

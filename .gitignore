@@ -1,0 +1,16 @@
+# секреты — токен живёт в GitHub repo secrets, НЕ в коде
+run.sh
+
+# рантайм-мусор
+*.log
+state.json
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# дампы/снапшоты от ресёрча (не нужны в деплое)
+*_dump.json
+frag_listings.json
+listing_snapshot.json
+snipes_dump.json
