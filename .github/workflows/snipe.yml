@@ -1,28 +1,30 @@
 name: snipe-numbers alert bot
 
+# Публичный репо = безлимит Actions-минут. Гоняем ДЛИННЫЙ loop-джоб (тик каждые 45с),
+# который живёт до ~5.8ч; расписание каждые 30 мин рестартит его (cancel-in-progress),
+# так что всегда крутится ровно один свежий инстанс. Если GH дропнет триггер — текущий
+# джоб доживает по таймауту до 350 мин, гэпа нет.
+
 on:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут (UTC; GH может задержать на 1-3 мин под нагрузкой)
-  workflow_dispatch: {}      # ручной запуск кнопкой в Actions
+    - cron: "17 * * * *"     # раз в час (не :00 — там пик нагрузки GH); рестарт мягкий
+  workflow_dispatch: {}
 
 concurrency:
   group: snipe-bot
-  cancel-in-progress: false  # не обрывать тик на полпути
+  cancel-in-progress: true   # новый триггер гасит старый → всегда один инстанс
 
 jobs:
-  tick:
+  loop:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 350      # бэкстоп, если расписание задержится
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # дедуп-стейт между запусками через cache (без коммит-спама).
-      # ключ уникален на запуск → всегда сохраняем свежий; restore-keys тянет последний.
-      - name: Restore state
+      - name: Restore dedup state
         uses: actions/cache@v4
         with:
           path: state.json
@@ -30,13 +32,16 @@ jobs:
           restore-keys: |
             snipe-state-
 
-      - name: Run alert bot (one tick)
+      - name: Run alert bot (loop)
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          TICK_SECONDS: "45"    # тик каждые 45 секунд
+          GG_FETCH: "120"       # лёгкий фетч на быстрых тиках (не весь стакан)
+          FRAG_FETCH: "80"
           MARGIN: "0.15"
           FEE_SELL: "0.10"
           MIN_NET_TON: "30"
-          FLOOR_PCT: "1.5"   # порог = флор * (1 + 1.5%): ловим всё в пределах 1.5% над флором
-          FLOOR_MAX: "0"     # 0 = только флор+%; поставь напр. "1600" чтобы слать ВСЁ дешевле 1600 TON
+          FLOOR_PCT: "1.5"      # порог = флор * (1 + 1.5%)
+          FLOOR_MAX: "0"        # 0 = только флор+%; поставь напр. "1600" чтобы слать всё дешевле
         run: python alert_bot.py
