@@ -37,4 +37,5 @@ jobs:
           MARGIN: "0.15"
           FEE_SELL: "0.10"
           MIN_NET_TON: "30"
+          FLOOR_MAX: "0"     # 0 = только скользящий флор; поставь напр. "1600" чтобы слать ВСЁ дешевле 1600 TON
         run: python alert_bot.py

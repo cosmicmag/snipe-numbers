@@ -30,6 +30,7 @@ FEE_SELL = float(os.environ.get("FEE_SELL", "0.10"))   # 5% маркет + ~5% �
 GAS_TON = float(os.environ.get("GAS_TON", "1.0"))
 MIN_NET_TON = float(os.environ.get("MIN_NET_TON", "30"))  # минимум чистыми чтоб алертить арб
 CHEAP_TOP_N = 5
+FLOOR_MAX = float(os.environ.get("FLOOR_MAX", "0"))       # абсолютный потолок: слать любой fix-price <= этого (0=выкл)
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "0"))   # >0 = бесконечный loop с этим интервалом; 0 = один тик
 GG_FETCH = int(os.environ.get("GG_FETCH", "400"))         # сколько листингов Getgems тянуть за тик (на быстрых тиках меньше)
 FRAG_FETCH = int(os.environ.get("FRAG_FETCH", "200"))
@@ -103,23 +104,28 @@ def tick():
     s = load_state()
     seen = set(s.get("seen_ids", []))
     alerted = set(s.get("alerted", []))
-    prev_floor = s.get("gg_floor")
+    prev_true = s.get("gg_true_floor")   # текущий флор Getgems с прошлого тика
     cold = not seen
 
     listings = gather()
     if not listings:
         log("0 листингов — скип"); return
 
-    gg_floor = calibrate_floor(listings, venue="Getgems", kind="fixed")
+    gg_floor = calibrate_floor(listings, venue="Getgems", kind="fixed")   # робастный p5 для fair-value
     frag_floor = calibrate_floor(listings, venue="Fragment", kind="auction") or \
                  calibrate_floor(listings, venue="Fragment", kind="fixed")
     base = gg_floor or frag_floor or min(l["price"] for l in listings if l["price"] > 0)
+    # ИСТИННЫЙ текущий флор = реальная самая дешёвая fix-price TON на Getgems прямо сейчас
+    gg_fix_ton = [l["price"] for l in listings
+                  if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and l["price"] > 0]
+    gg_true_floor = min(gg_fix_ton) if gg_fix_ton else None
     # топ-N дешёвых fix-price для NEW-CHEAP
     fixed = sorted([l for l in listings if l["sale_type"] == "fixed" and l["price"] > 0],
                    key=lambda x: x["price"])
     cheap_ids = {l["address"] if "address" in l else l["id"] for l in fixed[:CHEAP_TOP_N]}
 
-    log(f"листингов {len(listings)} | GG-floor {gg_floor} Frag-floor {frag_floor} | base {base:.0f}")
+    log(f"листингов {len(listings)} | GG-флор(true) {gg_true_floor} (p5 {gg_floor}) | "
+        f"Frag {frag_floor} | FLOOR_MAX {FLOOR_MAX or '—'}")
 
     def lid(l):
         return l.get("address") or l.get("id")
@@ -147,14 +153,20 @@ def tick():
                         f"\nкупить GG {l['price']:.0f} → продать Frag ~{frag_floor:.0f}"
                         f"\nNET после комсы (~{int(FEE_SELL*100)}%): <b>+{net:.0f} TON</b>")))
                 continue
+        # 💎 НИЖЕ ФЛОРА: новый Getgems fix-price дешевле текущего флора ИЛИ ниже ручного потолка
+        if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and l["price"] > 0 and nid not in seen:
+            ref = None
+            if FLOOR_MAX and l["price"] <= FLOOR_MAX:
+                ref = ("потолок", FLOOR_MAX)
+            elif prev_true and l["price"] < prev_true:
+                ref = ("флор", prev_true)
+            if ref:
+                k = f"below:{nid}:{int(l['price'])}"
+                if k not in alerted:
+                    alerts.append((k, fmt(l, v, "💎 <b>НИЖЕ ФЛОРА</b>",
+                        f"\n<b>{l['price']:.0f} TON</b> &lt; {ref[0]} {ref[1]:.0f} TON")))
+                continue
         if cold:
-            continue
-        # 📉 FLOOR-DROP
-        if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and prev_floor and \
-                l["price"] < prev_floor * 0.97 and nid not in seen:
-            k = f"floor:{nid}:{int(l['price'])}"
-            if k not in alerted:
-                alerts.append((k, fmt(l, v, "📉 <b>FLOOR-DROP (Getgems)</b>")))
             continue
         # 🆕 NEW-CHEAP
         if nid in cheap_ids and nid not in seen:
@@ -169,7 +181,7 @@ def tick():
     json.dump({
         "ts": datetime.now(timezone.utc).isoformat(),
         "seen_ids": [lid(l) for l in listings],
-        "gg_floor": gg_floor,
+        "gg_true_floor": gg_true_floor,
         "alerted": list(alerted)[-3000:],
     }, open(STATE, "w"), indent=1)
 
