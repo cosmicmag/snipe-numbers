@@ -19,6 +19,7 @@ import os, json, time, statistics as st, urllib.request, urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone
 from getgems_feed import fetch_on_sale
+from getgems_offers import top_bid as gg_top_bid, TokenExpired
 from fragment_feed import fetch_listings
 from pattern_value import evaluate
 
@@ -26,7 +27,9 @@ ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state.json"
 LOG = ROOT / "alert_bot.log"
 MARGIN = float(os.environ.get("MARGIN", "0.15"))
-FEE_SELL = float(os.environ.get("FEE_SELL", "0.10"))   # 5% маркет + ~5% роялти Telegram
+FEE_SELL = float(os.environ.get("FEE_SELL", "0.06"))   # Getgems: 1% маркет + до 5% роялти (опц). 0.06 консерв / 0.02 без роялти
+MIN_OFFER_PROFIT = float(os.environ.get("MIN_OFFER_PROFIT", "40"))  # окно оффера: алерт если NET ≥ этого
+OFFER_GAS = float(os.environ.get("OFFER_GAS", "1.0"))
 GAS_TON = float(os.environ.get("GAS_TON", "1.0"))
 MIN_NET_TON = float(os.environ.get("MIN_NET_TON", "30"))  # минимум чистыми чтоб алертить арб
 CHEAP_TOP_N = 5
@@ -132,6 +135,27 @@ def tick():
         return l.get("address") or l.get("id")
 
     alerts = []
+
+    # ── 💰 ОФФЕР-ОКНО: топ-бид настолько ниже флора, что выгодно оффертить ──
+    try:
+        top, _all = gg_top_bid()
+        if top and gg_true_floor:
+            window = gg_true_floor * (1 - FEE_SELL) - top["price"] - OFFER_GAS
+            log(f"offers: топ-бид {top['price']:.0f} · окно {window:+.0f} TON (порог {MIN_OFFER_PROFIT:.0f})")
+            if window >= MIN_OFFER_PROFIT:
+                k = f"offerwin:{int(window // 25)}"
+                if k not in alerted:
+                    alerts.append((k, f"💰 <b>ОФФЕР-ОКНО</b>\nтоп-бид <b>{top['price']:.0f}</b> · флор <b>{gg_true_floor:.0f}</b> TON\n"
+                                      f"поставь оффер ~{top['price']+1:.0f} → перепродай по флору\n"
+                                      f"NET ~<b>+{window:.0f} TON</b> (комса {int(FEE_SELL*100)}%)"))
+    except TokenExpired as e:
+        k = f"ggtoken:{datetime.now(timezone.utc):%Y-%m-%d}"
+        if k not in alerted:
+            alerts.append((k, "🔑 <b>Getgems токен истёк</b> — мониторинг офферов на паузе.\n"
+                              "Пришли свежий cURL запроса collectionOffers (из DevTools), обновлю секрет."))
+        log(f"offers token expired: {e}")
+    except Exception as e:
+        log(f"offers err: {e}")
     for l in listings:
         nid = lid(l)
         v = evaluate(l["number"])

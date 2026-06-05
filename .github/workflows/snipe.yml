@@ -36,6 +36,9 @@ jobs:
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          GG_AUTH_TOKEN: ${{ secrets.GG_AUTH_TOKEN }}   # сессия Getgems для чтения офферов
+          GG_JWT: ${{ secrets.GG_JWT }}
+          MIN_OFFER_PROFIT: "40"   # окно оффера: алерт если NET ≥ 40 TON
           TICK_SECONDS: "15"    # тик каждые 15 секунд
           GG_FETCH: "100"       # 2 страницы — флор ловится уже на 1-й, запас на сдвиг сортировки
           FRAG_FETCH: "60"
