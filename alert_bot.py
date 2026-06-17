@@ -9,6 +9,7 @@
 Сигналы (только НОВОЕ):
   💰 ОФФЕР-ОКНО   — топ-бид настолько ниже флора, что выгодно оффертить и перепродать
   💰 CROSS-VENUE  — Getgems fix-price дешевле Fragment-флора (готовый арб после комсы)
+  🔻 ПОД ФЛОРОМ   — новый Getgems fix-price ниже прежнего флора на UNDERCUT_PCT%+
   💎 У ФЛОРА      — новый Getgems fix-price у флора (флор+FLOOR_PCT%) или ниже потолка
 
 Env: TG_BOT_TOKEN, TG_CHAT_ID. Без TG_* — dry-run в stdout.
@@ -31,6 +32,7 @@ OFFER_GAS = float(os.environ.get("OFFER_GAS", "1.0"))
 GAS_TON = float(os.environ.get("GAS_TON", "1.0"))
 MIN_NET_TON = float(os.environ.get("MIN_NET_TON", "30"))  # минимум чистыми чтоб алертить арб
 FLOOR_PCT = float(os.environ.get("FLOOR_PCT", "1.5"))     # порог = флор * (1 + FLOOR_PCT/100); ловим всё у флора
+UNDERCUT_PCT = float(os.environ.get("UNDERCUT_PCT", "2"))  # 🔻 алерт если новый листинг ≤ флор*(1 - UNDERCUT_PCT/100)
 FLOOR_MAX = float(os.environ.get("FLOOR_MAX", "0"))       # абсолютный потолок: слать любой fix-price <= этого (0=выкл)
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "0"))   # >0 = бесконечный loop с этим интервалом; 0 = один тик
 GG_FETCH = int(os.environ.get("GG_FETCH", "400"))         # сколько листингов Getgems тянуть за тик (на быстрых тиках меньше)
@@ -161,6 +163,16 @@ def tick():
                     alerts.append((k, fmt(l, v, "💰 <b>CROSS-VENUE ARB</b>",
                         f"\nкупить GG {l['price']:.0f} → продать Frag ~{frag_floor:.0f}"
                         f"\nNET после комсы (~{int(FEE_SELL*100)}%): <b>+{net:.0f} TON</b>")))
+                continue
+        # 🔻 ПОД ФЛОРОМ: новый Getgems fix-price заметно ниже прежнего флора (undercut ≥ UNDERCUT_PCT%)
+        if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and l["price"] > 0 and nid not in seen:
+            base_floor = prev_true or gg_true_floor
+            if base_floor and l["price"] <= base_floor * (1 - UNDERCUT_PCT / 100):
+                disc = (base_floor - l["price"]) / base_floor * 100
+                k = f"under:{nid}:{int(l['price'])}"
+                if k not in alerted:
+                    alerts.append((k, fmt(l, v, "🔻 <b>ПОД ФЛОРОМ</b>",
+                        f"\n<b>{l['price']:.0f} TON</b> = −{disc:.1f}% от флора {base_floor:.0f}")))
                 continue
         # 💎 У ФЛОРА: новый Getgems fix-price в пределах флор*(1+FLOOR_PCT%) ИЛИ ниже ручного потолка
         if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and l["price"] > 0 and nid not in seen:
