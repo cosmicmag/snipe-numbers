@@ -7,12 +7,11 @@
 Один запуск = один тик (гоняй через cron/loop). Дедуп по state.json.
 
 Сигналы (только НОВОЕ):
-  🎯 RARE-SNIPE   — номер с паттерном дешевле pattern-fair на MARGIN+
-  💰 CROSS-VENUE  — Getgems fix-price дешевле Fragment-флора на SPREAD+ (готовый арб)
-  📉 FLOOR-DROP   — fix-price ниже прежнего флора
-  🆕 NEW-CHEAP    — новый fix-price в топ-N дешёвых
+  💰 ОФФЕР-ОКНО   — топ-бид настолько ниже флора, что выгодно оффертить и перепродать
+  💰 CROSS-VENUE  — Getgems fix-price дешевле Fragment-флора (готовый арб после комсы)
+  💎 У ФЛОРА      — новый Getgems fix-price у флора (флор+FLOOR_PCT%) или ниже потолка
 
-Env: TG_BOT_TOKEN, TG_CHAT_ID, MARGIN(0.15), SPREAD(0.04). Без TG_* — dry-run в stdout.
+Env: TG_BOT_TOKEN, TG_CHAT_ID. Без TG_* — dry-run в stdout.
 """
 from __future__ import annotations
 import os, json, time, statistics as st, urllib.request, urllib.parse
@@ -26,13 +25,11 @@ from pattern_value import evaluate
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state.json"
 LOG = ROOT / "alert_bot.log"
-MARGIN = float(os.environ.get("MARGIN", "0.15"))
 FEE_SELL = float(os.environ.get("FEE_SELL", "0.06"))   # Getgems: 1% маркет + до 5% роялти (опц). 0.06 консерв / 0.02 без роялти
 MIN_OFFER_PROFIT = float(os.environ.get("MIN_OFFER_PROFIT", "40"))  # окно оффера: алерт если NET ≥ этого
 OFFER_GAS = float(os.environ.get("OFFER_GAS", "1.0"))
 GAS_TON = float(os.environ.get("GAS_TON", "1.0"))
 MIN_NET_TON = float(os.environ.get("MIN_NET_TON", "30"))  # минимум чистыми чтоб алертить арб
-CHEAP_TOP_N = 5
 FLOOR_PCT = float(os.environ.get("FLOOR_PCT", "1.5"))     # порог = флор * (1 + FLOOR_PCT/100); ловим всё у флора
 FLOOR_MAX = float(os.environ.get("FLOOR_MAX", "0"))       # абсолютный потолок: слать любой fix-price <= этого (0=выкл)
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "0"))   # >0 = бесконечный loop с этим интервалом; 0 = один тик
@@ -109,7 +106,6 @@ def tick():
     seen = set(s.get("seen_ids", []))
     alerted = set(s.get("alerted", []))
     prev_true = s.get("gg_true_floor")   # текущий флор Getgems с прошлого тика
-    cold = not seen
 
     listings = gather()
     if not listings:
@@ -123,10 +119,6 @@ def tick():
     gg_fix_ton = [l["price"] for l in listings
                   if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and l["price"] > 0]
     gg_true_floor = min(gg_fix_ton) if gg_fix_ton else None
-    # топ-N дешёвых fix-price для NEW-CHEAP
-    fixed = sorted([l for l in listings if l["sale_type"] == "fixed" and l["price"] > 0],
-                   key=lambda x: x["price"])
-    cheap_ids = {l["address"] if "address" in l else l["id"] for l in fixed[:CHEAP_TOP_N]}
 
     log(f"листингов {len(listings)} | GG-флор(true) {gg_true_floor} (p5 {gg_floor}) | "
         f"Frag {frag_floor} | FLOOR_MAX {FLOOR_MAX or '—'}")
@@ -159,15 +151,7 @@ def tick():
     for l in listings:
         nid = lid(l)
         v = evaluate(l["number"])
-        fair = v.fair(base)
 
-        # 🎯 RARE-SNIPE (отсекаем слабый pair-шум: только mult>=1.4)
-        if v.mult >= 1.4 and l["price"] > 0 and l["price"] < fair * (1 - MARGIN):
-            k = f"snipe:{nid}:{int(l['price'])}"
-            if k not in alerted:
-                alerts.append((k, fmt(l, v, "🎯 <b>RARE-SNIPE</b>",
-                                      f"\nfair≈<b>{fair:.0f}</b> (−{(fair-l['price'])/fair*100:.0f}%)")))
-            continue
         # 💰 CROSS-VENUE: Getgems fix-price → продать на Fragment, NET после комиссий
         if l["venue"] == "Getgems" and l["sale_type"] == "fixed" and frag_floor and l["price"] > 0:
             net = frag_floor * (1 - FEE_SELL) - l["price"] - GAS_TON
@@ -194,13 +178,6 @@ def tick():
                              + (f", флор {base_floor:.0f}" if base_floor else "") + ")")
                     alerts.append((k, fmt(l, v, "💎 <b>У ФЛОРА</b>", extra)))
                 continue
-        if cold:
-            continue
-        # 🆕 NEW-CHEAP
-        if nid in cheap_ids and nid not in seen:
-            k = f"cheap:{nid}"
-            if k not in alerted:
-                alerts.append((k, fmt(l, v, "🆕 <b>NEW в топ-5 дешёвых</b>")))
 
     for k, text in alerts:
         tg_send(text); alerted.add(k); time.sleep(0.4)
