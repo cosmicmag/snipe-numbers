@@ -20,8 +20,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 from getgems_feed import fetch_on_sale
 from getgems_offers import top_bid as gg_top_bid, TokenExpired
-from fragment_feed import fetch_listings, fetch_auctions
-from pattern_value import evaluate
+from fragment_feed import fetch_listings, fetch_auctions, fetch_sale_book
+from pattern_value import evaluate, value_class
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state.json"
@@ -37,9 +37,12 @@ FLOOR_MAX = float(os.environ.get("FLOOR_MAX", "0"))       # абсолютный
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "0"))   # >0 = бесконечный loop с этим интервалом; 0 = один тик
 GG_FETCH = int(os.environ.get("GG_FETCH", "400"))         # сколько листингов Getgems тянуть за тик (на быстрых тиках меньше)
 FRAG_FETCH = int(os.environ.get("FRAG_FETCH", "200"))
-FRAG_AUCTIONS = int(os.environ.get("FRAG_AUCTIONS", "1"))  # 1 = тянуть отдельный premium-auction фид Fragment
-MARGIN_AUC = float(os.environ.get("MARGIN_AUC", "0.15"))   # 💎 алерт если ставка < fair*(1-MARGIN_AUC) и есть паттерн
-TARGET_MARGIN = float(os.environ.get("TARGET_MARGIN", "0.15"))  # рекомендуемый max-bid = fair*(1-TARGET_MARGIN)
+FRAG_AUCTIONS = int(os.environ.get("FRAG_AUCTIONS", "1"))  # 1 = сканить аукционы Fragment на снайп
+AUC_TTL = int(os.environ.get("AUC_TTL", "180"))            # как часто (сек) пересобирать стакан+аукционы (не каждые 15с)
+UNDERCUT = float(os.environ.get("UNDERCUT", "0.03"))       # перевыставляем на 3% ниже флора класса, чтоб реально ушло
+MIN_PROFIT = float(os.environ.get("MIN_PROFIT", "150"))    # минимум чистыми TON, чтоб вообще алертить аукцион
+MIN_COMPS = int(os.environ.get("MIN_COMPS", "3"))          # минимум живых листингов класса, чтоб верить его флору
+ENDS_DAYS = float(os.environ.get("ENDS_DAYS", "14"))       # игнорить аукционы, что кончаются позже (цена ещё уйдёт)
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT_ID", "")
 
@@ -86,17 +89,51 @@ def gather():
             out.append(l)
     except Exception as e:
         log(f"⚠️ fragment err: {e}")
-    if FRAG_AUCTIONS:
-        try:
-            seen_ids = {l.get("id") for l in out if l["venue"] == "Fragment"}
-            for l in fetch_auctions():
-                if l["id"] in seen_ids:
-                    continue
-                l["venue"] = "Fragment"
-                out.append(l)
-        except Exception as e:
-            log(f"⚠️ fragment auctions err: {e}")
     return out
+
+
+_auc_cache = {"t": 0.0, "auctions": [], "floors": {}, "plain": None}
+
+
+def class_floors(sale_book) -> dict:
+    """{класс: [цены fixed-price асков]} из полного аск-стакана. Это РЕАЛЬНЫЙ floor,
+    по которому ты перевыставишь номер этого класса."""
+    by: dict[str, list[float]] = {}
+    for l in sale_book:
+        if l["sale_type"] != "fixed" or l["price"] <= 0:
+            continue
+        cls, _ = value_class(l["number"])
+        by.setdefault(cls, []).append(l["price"])
+    for v in by.values():
+        v.sort()
+    return by
+
+
+def auction_scan():
+    """Аукционы + флоры по классам, кэш на AUC_TTL сек (аукционы движутся медленно —
+    незачем долбить Fragment каждые 15с)."""
+    now = time.monotonic()
+    if _auc_cache["auctions"] and now - _auc_cache["t"] < AUC_TTL:
+        return _auc_cache["auctions"], _auc_cache["floors"]
+    book = fetch_sale_book()
+    floors = class_floors(book)
+    aucs = fetch_auctions()
+    _auc_cache.update(t=now, auctions=aucs, floors=floors)
+    return aucs, floors
+
+
+def _ends_in_days(expires: str):
+    """Сколько дней до конца аукциона. None если не распарсить."""
+    if not expires:
+        return None
+    try:
+        if expires.isdigit():
+            end = datetime.fromtimestamp(int(expires), timezone.utc)
+        else:
+            end = datetime.fromisoformat(expires)
+        return (end - datetime.now(timezone.utc)).total_seconds() / 86400
+    except Exception:
+        return None
 
 
 def calibrate_floor(listings, venue=None, kind="fixed") -> float | None:
@@ -204,27 +241,50 @@ def tick():
                     alerts.append((k, fmt(l, v, "💎 <b>У ФЛОРА</b>", extra)))
                 continue
 
-    # ── 💎 ПРЕМИУМ-АУКЦИОН: паттерн-номер на аукционе Fragment ниже fair-value ──
-    # альфа из бэктеста: premium-аукционов мало (тонкая конкуренция) → дисконт доживает
-    # до клиринга. Только mult>1 (паттерн); даём готовый max-bid и ожидаемый профит.
-    for l in listings:
-        if l.get("venue") != "Fragment" or l["sale_type"] != "auction" or l["price"] <= 0:
-            continue
-        v = evaluate(l["number"])
-        if v.mult <= 1.0:
-            continue
-        fair = round(base * v.mult, 1) if base else None
-        if not fair or l["price"] >= fair * (1 - MARGIN_AUC):
-            continue
-        max_bid = fair * (1 - TARGET_MARGIN)
-        profit = fair * (1 - FEE_SELL) - max_bid
-        k = f"auc:{lid(l)}:{int(l['price'])}"
-        if k not in alerted:
-            ends = l.get("expires", "")
-            alerts.append((k, fmt(l, v, "💎 <b>ПРЕМИУМ-АУКЦИОН</b>",
-                f"\nставка <b>{l['price']:.0f}</b> · fair≈<b>{fair:.0f}</b> TON"
-                f"\nбей до <b>{max_bid:.0f} TON</b> → профит ~<b>+{profit:.0f}</b> (комса {int(FEE_SELL*100)}%)"
-                + (f"\n⏳ конец: {ends}" if ends else ""))))
+    # ── 💎 АУКЦИОН-СНАЙП: купить на аукционе ниже РЕАЛЬНОГО флора своего класса ──
+    # Выход привязан к фактическому floor того же класса из стакана (а не к формуле):
+    # alert только если ставка ниже (флор − андеркат − комса − запас прибыли MIN_PROFIT).
+    # Слабые паттерны (seq3/pair/…) value_class относит к 'plain' → оцениваются по
+    # обычному флору и не флагаются, если ставка уже у/выше floor. Никаких «бей выше флора».
+    if FRAG_AUCTIONS:
+        try:
+            aucs, floors = auction_scan()
+            plain = floors["plain"][0] if floors.get("plain") else None
+            for l in aucs:
+                if l["price"] <= 0:
+                    continue
+                d = _ends_in_days(l.get("expires", ""))
+                if d is not None and d > ENDS_DAYS:
+                    continue  # кончается слишком далеко — ставку ещё перебьют, не сигнал
+                cls, label = value_class(l["number"])
+                pool = floors.get(cls, [])
+                if len(pool) >= MIN_COMPS:
+                    cls_floor, comps_n = pool[0], len(pool)
+                elif plain:
+                    cls_floor, comps_n, label = plain, len(floors["plain"]), f"{label}→plain"
+                else:
+                    continue
+                relist = cls_floor * (1 - UNDERCUT)        # перевыставим чуть ниже флора, чтоб ушло
+                exit_net = relist * (1 - FEE_SELL)         # чистыми после комсы
+                profit = exit_net - l["price"]             # профит, если возьмёшь по текущей ставке
+                if profit < MIN_PROFIT:
+                    continue
+                max_bid = exit_net - MIN_PROFIT            # выше этого бить нельзя — съест запас
+                k = f"auc:{l['id']}:{int(l['price'])}"
+                if k not in alerted:
+                    ends = l.get("expires", "")
+                    when = f" (~{d:.1f}д)" if d is not None else ""
+                    alerts.append((k,
+                        f"💎 <b>АУКЦИОН-СНАЙП</b>  ·  <b>Fragment</b>\n"
+                        f"<b>{l['number']}</b> — ставка <b>{l['price']:.0f} TON</b>\n"
+                        f"класс <b>{label}</b> · флор {cls_floor:.0f} TON ({comps_n} компов)\n"
+                        f"перепродашь ~{relist:.0f} → по текущей чистыми <b>+{profit:.0f} TON</b> "
+                        f"(комса {int(FEE_SELL*100)}%)\n"
+                        f"⛔ не бей выше <b>{max_bid:.0f} TON</b>\n"
+                        + (f"⏳ конец: {ends}{when}\n" if ends else "")
+                        + l["url"]))
+        except Exception as e:
+            log(f"⚠️ auction-snipe err: {e}")
 
     for k, text in alerts:
         tg_send(text); alerted.add(k); time.sleep(0.4)

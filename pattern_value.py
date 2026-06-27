@@ -128,6 +128,34 @@ def evaluate(number: str) -> Valuation:
     return v
 
 
+# ── класс для ОЦЕНКИ по реальному стакану ──
+# Только паттерны, за которые рынок реально платит премию, получают свой класс.
+# Слабьё (pair / seq3 / …00 / 3 разные цифры) намеренно = plain: на него спроса по
+# премии нет, выход = обычный floor. Так оценка идёт от РЕАЛЬНОГО флора класса,
+# а не от выдуманного множителя.
+
+def value_class(number: str) -> tuple[str, str]:
+    """('triple','triple') и т.п.; для непремиальных номеров → ('plain','plain')."""
+    d = digits_of(number)
+    rr = _max_repeat_run(d)
+    sq = _max_sequential_run(d)
+    tz = _trailing_zeros(d)
+    nd = _distinct(d)
+    if rr >= 4:
+        return "quad", f"repeat×{rr}"
+    if _is_palindrome(d):
+        return "palindrome", "palindrome"
+    if sq >= 4:
+        return "seq4", f"seq{sq}"
+    if tz >= 3:
+        return "zeros3", f"…{'0'*tz}"
+    if rr == 3:
+        return "triple", "triple"
+    if nd <= 2:
+        return "two_distinct", f"{nd}digits"
+    return "plain", "plain"
+
+
 if __name__ == "__main__":
     tests = ["+888 0391 5274", "+888 8888 0000", "+888 1234 5678",
              "+888 0007 0000", "+888 1212 1212", "+888 0660 0660",

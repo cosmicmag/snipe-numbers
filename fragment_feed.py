@@ -65,18 +65,42 @@ def _api_session(filt: str = "auction"):
     return op, m.group(1)
 
 
-def fetch_auctions(max_rows: int = 400) -> list[dict]:
-    """
-    Отдельный фид аукционов (filter=auction) через внутренний /api с пагинацией по query.
-    Это ловит ПРЕМИУМ-аукционы (triple/two-digit), которых нет в дешёвом sale-срезе —
-    именно там тонкая конкуренция и живёт снайп-альфа. price = текущая ставка/мин-бид.
-    """
-    op, hash_ = _api_session("auction")
+def _parse_cards(html: str) -> list[dict]:
+    """Распарсить строки таблицы /api в унифицированные dict'ы (одна <tr> = один лот)."""
+    out = []
+    for row in re.findall(r'<tr class="tm-row-selectable">(.*?)</tr>', html, re.S):
+        m_id = re.search(r'/number/(\d+)', row)
+        m_price = re.search(r'icon-ton">([\d,]+)', row)
+        if not (m_id and m_price):
+            continue
+        nid = m_id.group(1)
+        m_val = re.search(r'tm-value">(\+888[^<]*)<', row)
+        number = m_val.group(1).strip() if m_val else "+888 " + nid[3:]
+        m_exp = re.search(r'datetime="([^"]+)"|data-expires="(\d+)"', row)
+        # "For sale" = fix-price (купить сразу); иначе — аукцион (ставка/min-bid).
+        # NB: tm-timer есть и у fix-price (relative "listed ago") — на него не опираемся.
+        is_fixed = "For sale" in row
+        out.append({
+            "id": nid,
+            "number": number,
+            "digits": re.sub(r"\D", "", number)[-8:],
+            "price": float(m_price.group(1).replace(",", "")),
+            "sale_type": "fixed" if is_fixed else "auction",
+            "time_left": "",
+            "expires": (m_exp.group(1) or m_exp.group(2)) if m_exp else "",
+            "url": f"{BASE}/number/{nid}",
+        })
+    return out
+
+
+def _api_fetch(filt: str, sorts: tuple[str, ...], max_rows: int) -> list[dict]:
+    """Полный фид filter через внутренний /api с пагинацией по query (keyless)."""
+    op, hash_ = _api_session(filt)
     seen: dict[str, dict] = {}
     for q in _API_QUERIES:
-        for srt in ("ending", "price_asc"):
+        for srt in sorts:
             data = urllib.parse.urlencode({
-                "type": "numbers", "query": q, "filter": "auction",
+                "type": "numbers", "query": q, "filter": filt,
                 "sort": srt, "method": "searchAuctions",
             }).encode()
             req = urllib.request.Request(f"{BASE}/api?hash={hash_}", data=data, headers={
@@ -88,30 +112,27 @@ def fetch_auctions(max_rows: int = 400) -> list[dict]:
                 html = json.loads(op.open(req, timeout=20).read().decode()).get("html", "")
             except Exception:
                 continue
-            for nid, part in re.findall(r'/number/(\d+)"(.*?)(?=/number/\d+"|$)', html, re.S):
-                if nid in seen:
-                    continue
-                m_price = re.search(r'icon-ton">([\d,]+)', part)
-                if not m_price:
-                    continue
-                m_val = re.search(r'tm-value">(\+888[^<]*)<', part)
-                number = m_val.group(1).strip() if m_val else "+888 " + nid[3:]
-                m_exp = re.search(r'data-expires="(\d+)"|datetime="([^"]+)"', part)
-                seen[nid] = {
-                    "id": nid,
-                    "number": number,
-                    "digits": re.sub(r"\D", "", number)[-8:],
-                    "price": float(m_price.group(1).replace(",", "")),
-                    "sale_type": "auction",
-                    "time_left": "",
-                    "expires": (m_exp.group(1) or m_exp.group(2)) if m_exp else "",
-                    "url": f"{BASE}/number/{nid}",
-                }
+            for c in _parse_cards(html):
+                seen.setdefault(c["id"], c)
             if len(seen) >= max_rows:
                 break
         if len(seen) >= max_rows:
             break
     return list(seen.values())
+
+
+def fetch_auctions(max_rows: int = 400) -> list[dict]:
+    """Фид аукционов (filter=auction), включая премиум-лоты. price = текущая ставка/мин-бид."""
+    return _api_fetch("auction", ("ending", "price_asc"), max_rows)
+
+
+def fetch_sale_book(max_rows: int = 800) -> list[dict]:
+    """
+    Полный аск-стакан (filter=sale): и fixed-price, и аукционы.
+    Нужен, чтобы посчитать РЕАЛЬНЫЙ floor по каждому классу паттерна (по fixed-price),
+    т.е. за сколько ты реально перевыставишь номер — а не по выдуманной формуле.
+    """
+    return _api_fetch("sale", ("price_asc", "price_desc"), max_rows)
 
 
 if __name__ == "__main__":
