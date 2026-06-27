@@ -47,4 +47,7 @@ jobs:
           FLOOR_PCT: "0"        # порог = ровно флор (без надбавки): алерт только по флору или ниже
           UNDERCUT_PCT: "4.5"   # 🔻 ПОД ФЛОРОМ: новый листинг ниже прежнего флора на ≥4.5%
           FLOOR_MAX: "0"        # 0 = только флор+%; поставь напр. "1600" чтобы слать всё дешевле
+          FRAG_AUCTIONS: "1"    # 💎 тянуть premium-auction фид Fragment (triple/two-digit)
+          MARGIN_AUC: "0.15"    # алерт по аукциону если ставка < fair*(1-0.15)
+          TARGET_MARGIN: "0.15" # рекомендуемый max-bid = fair*(1-0.15)
         run: python alert_bot.py

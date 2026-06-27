@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from getgems_feed import fetch_on_sale
 from getgems_offers import top_bid as gg_top_bid, TokenExpired
-from fragment_feed import fetch_listings
+from fragment_feed import fetch_listings, fetch_auctions
 from pattern_value import evaluate
 
 ROOT = Path(__file__).resolve().parent
@@ -37,6 +37,9 @@ FLOOR_MAX = float(os.environ.get("FLOOR_MAX", "0"))       # абсолютный
 TICK_SECONDS = int(os.environ.get("TICK_SECONDS", "0"))   # >0 = бесконечный loop с этим интервалом; 0 = один тик
 GG_FETCH = int(os.environ.get("GG_FETCH", "400"))         # сколько листингов Getgems тянуть за тик (на быстрых тиках меньше)
 FRAG_FETCH = int(os.environ.get("FRAG_FETCH", "200"))
+FRAG_AUCTIONS = int(os.environ.get("FRAG_AUCTIONS", "1"))  # 1 = тянуть отдельный premium-auction фид Fragment
+MARGIN_AUC = float(os.environ.get("MARGIN_AUC", "0.15"))   # 💎 алерт если ставка < fair*(1-MARGIN_AUC) и есть паттерн
+TARGET_MARGIN = float(os.environ.get("TARGET_MARGIN", "0.15"))  # рекомендуемый max-bid = fair*(1-TARGET_MARGIN)
 TG_TOKEN = os.environ.get("TG_BOT_TOKEN", "")
 TG_CHAT = os.environ.get("TG_CHAT_ID", "")
 
@@ -83,6 +86,16 @@ def gather():
             out.append(l)
     except Exception as e:
         log(f"⚠️ fragment err: {e}")
+    if FRAG_AUCTIONS:
+        try:
+            seen_ids = {l.get("id") for l in out if l["venue"] == "Fragment"}
+            for l in fetch_auctions():
+                if l["id"] in seen_ids:
+                    continue
+                l["venue"] = "Fragment"
+                out.append(l)
+        except Exception as e:
+            log(f"⚠️ fragment auctions err: {e}")
     return out
 
 
@@ -190,6 +203,28 @@ def tick():
                              + (f", флор {base_floor:.0f}" if base_floor else "") + ")")
                     alerts.append((k, fmt(l, v, "💎 <b>У ФЛОРА</b>", extra)))
                 continue
+
+    # ── 💎 ПРЕМИУМ-АУКЦИОН: паттерн-номер на аукционе Fragment ниже fair-value ──
+    # альфа из бэктеста: premium-аукционов мало (тонкая конкуренция) → дисконт доживает
+    # до клиринга. Только mult>1 (паттерн); даём готовый max-bid и ожидаемый профит.
+    for l in listings:
+        if l.get("venue") != "Fragment" or l["sale_type"] != "auction" or l["price"] <= 0:
+            continue
+        v = evaluate(l["number"])
+        if v.mult <= 1.0:
+            continue
+        fair = round(base * v.mult, 1) if base else None
+        if not fair or l["price"] >= fair * (1 - MARGIN_AUC):
+            continue
+        max_bid = fair * (1 - TARGET_MARGIN)
+        profit = fair * (1 - FEE_SELL) - max_bid
+        k = f"auc:{lid(l)}:{int(l['price'])}"
+        if k not in alerted:
+            ends = l.get("expires", "")
+            alerts.append((k, fmt(l, v, "💎 <b>ПРЕМИУМ-АУКЦИОН</b>",
+                f"\nставка <b>{l['price']:.0f}</b> · fair≈<b>{fair:.0f}</b> TON"
+                f"\nбей до <b>{max_bid:.0f} TON</b> → профит ~<b>+{profit:.0f}</b> (комса {int(FEE_SELL*100)}%)"
+                + (f"\n⏳ конец: {ends}" if ends else ""))))
 
     for k, text in alerts:
         tg_send(text); alerted.add(k); time.sleep(0.4)
