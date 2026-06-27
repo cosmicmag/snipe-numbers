@@ -9,7 +9,7 @@ Fragment отдаёт HTML-таблицу (sort=price_asc&filter=sale), auth н�
   - таймер + "Will close soon" → аукцион (мгновенно не купить)
 """
 from __future__ import annotations
-import re, json, sys, urllib.request
+import re, json, sys, urllib.request, urllib.parse, http.cookiejar
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/148.0.0.0 Safari/537.36"
 BASE = "https://fragment.com"
@@ -50,6 +50,70 @@ def fetch_listings(max_rows: int = 200) -> list[dict]:
     return out
 
 
+_API_QUERIES = [""] + [str(d) for d in range(10)]
+
+
+def _api_session(filt: str = "auction"):
+    """GET страницы numbers -> cookie-сессия + api-hash (нужен для /api пагинации)."""
+    cj = http.cookiejar.CookieJar()
+    op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+    op.addheaders = [("User-Agent", UA)]
+    page = op.open(f"{BASE}/numbers?filter={filt}", timeout=20).read().decode("utf-8", "replace")
+    m = re.search(r'apiUrl":"\\/api\?hash=([a-f0-9]+)', page)
+    if not m:
+        raise RuntimeError("Fragment: api-hash не найден (поменялась вёрстка?)")
+    return op, m.group(1)
+
+
+def fetch_auctions(max_rows: int = 400) -> list[dict]:
+    """
+    Отдельный фид аукционов (filter=auction) через внутренний /api с пагинацией по query.
+    Это ловит ПРЕМИУМ-аукционы (triple/two-digit), которых нет в дешёвом sale-срезе —
+    именно там тонкая конкуренция и живёт снайп-альфа. price = текущая ставка/мин-бид.
+    """
+    op, hash_ = _api_session("auction")
+    seen: dict[str, dict] = {}
+    for q in _API_QUERIES:
+        for srt in ("ending", "price_asc"):
+            data = urllib.parse.urlencode({
+                "type": "numbers", "query": q, "filter": "auction",
+                "sort": srt, "method": "searchAuctions",
+            }).encode()
+            req = urllib.request.Request(f"{BASE}/api?hash={hash_}", data=data, headers={
+                "X-Requested-With": "XMLHttpRequest",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": f"{BASE}/numbers",
+            })
+            try:
+                html = json.loads(op.open(req, timeout=20).read().decode()).get("html", "")
+            except Exception:
+                continue
+            for nid, part in re.findall(r'/number/(\d+)"(.*?)(?=/number/\d+"|$)', html, re.S):
+                if nid in seen:
+                    continue
+                m_price = re.search(r'icon-ton">([\d,]+)', part)
+                if not m_price:
+                    continue
+                m_val = re.search(r'tm-value">(\+888[^<]*)<', part)
+                number = m_val.group(1).strip() if m_val else "+888 " + nid[3:]
+                m_exp = re.search(r'data-expires="(\d+)"|datetime="([^"]+)"', part)
+                seen[nid] = {
+                    "id": nid,
+                    "number": number,
+                    "digits": re.sub(r"\D", "", number)[-8:],
+                    "price": float(m_price.group(1).replace(",", "")),
+                    "sale_type": "auction",
+                    "time_left": "",
+                    "expires": (m_exp.group(1) or m_exp.group(2)) if m_exp else "",
+                    "url": f"{BASE}/number/{nid}",
+                }
+            if len(seen) >= max_rows:
+                break
+        if len(seen) >= max_rows:
+            break
+    return list(seen.values())
+
+
 if __name__ == "__main__":
     ls = fetch_listings(int(sys.argv[1]) if len(sys.argv) > 1 else 30)
     print(f"fetched {len(ls)} listings (cheapest first)\n")
@@ -58,3 +122,8 @@ if __name__ == "__main__":
     fixed = [l for l in ls if l["sale_type"] == "fixed"]
     print(f"\nfixed-price (instant-buy): {len(fixed)}/{len(ls)}")
     json.dump(ls, open("/tmp/frag_listings.json", "w"), indent=1)
+
+    aucs = fetch_auctions()
+    print(f"\nauctions feed: {len(aucs)} лотов (premium включая)")
+    for a in sorted(aucs, key=lambda x: x["price"])[:15]:
+        print(f"  bid {a['price']:>8.0f} TON  {a['number']:18s} ends {a['expires']}")
